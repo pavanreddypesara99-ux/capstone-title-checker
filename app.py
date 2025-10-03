@@ -8,9 +8,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 st.set_page_config(page_title="IBU Capstone Title Checker", page_icon="🧠", layout="wide")
 st.title("🧠 IBU Capstone Title Similarity Checker")
 
-# --- 1) Where is your dataset? ---
-# Easiest: keep your titles in a Google Sheet published as CSV.
-# You can replace DEFAULT_CSV_URL with your own link (or type it in the sidebar).
+# --- 1) Dataset Source ---
 DEFAULT_CSV_URL = (
     "https://docs.google.com/spreadsheets/d/e/2PACX-1vQQAoO_eJz3idWJSu4PVCzgBgEw_NDFwFgNiAOAGoQSvkvTMdZyxwVHiHSuPseZEvpoH6Z8SKDF077b/pub?output=csv"
 )
@@ -23,7 +21,7 @@ st.sidebar.markdown(
     "Publish to web → CSV, then paste the link here."
 )
 
-# --- 2) Load model & data (cached so it’s fast) ---
+# --- 2) Load model & data (cached) ---
 @st.cache_resource
 def load_model():
     return SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
@@ -31,11 +29,10 @@ def load_model():
 @st.cache_data(ttl=600)
 def load_titles(url: str) -> pd.DataFrame:
     df = pd.read_csv(url)
-    # Make sure we have a 'title' column
+    # Ensure column name is 'title'
     cols_lower = {c: c.strip().lower() for c in df.columns}
     df.rename(columns=cols_lower, inplace=True)
     if "title" not in df.columns:
-        # Assume first column is the title if not labeled
         df.rename(columns={df.columns[0]: "title"}, inplace=True)
     df["title"] = df["title"].astype(str).str.strip()
     df.dropna(subset=["title"], inplace=True)
@@ -43,10 +40,10 @@ def load_titles(url: str) -> pd.DataFrame:
     return df[["title"]]
 
 @st.cache_resource
-def embed_titles(model, titles: list[np.ndarray]):
-    return model.encode(titles, normalize_embeddings=True)
+def embed_titles(_model, titles: list[np.ndarray]):   # FIX: added underscore
+    return _model.encode(titles, normalize_embeddings=True)
 
-# Load
+# Load everything
 try:
     model = load_model()
     titles_df = load_titles(data_url)
@@ -66,18 +63,15 @@ threshold = st.slider("Flag if similarity ≥", 0.00, 1.00, 0.60, 0.01)
 # --- 4) Compute similarity ---
 if query:
     q_vec = model.encode([query], normalize_embeddings=True)
-    # cosine similarities (dot product because both normalized)
-    sims = (q_vec @ title_embeddings.T)[0]
-    out = pd.DataFrame(
-        {"Existing Title": title_list, "Similarity": sims}
-    ).sort_values("Similarity", ascending=False)
-    out["Similarity (%)]"] = (out["Similarity"] * 100).round(2)
+    sims = (q_vec @ title_embeddings.T)[0]  # cosine sim since normalized
+    out = pd.DataFrame({"Existing Title": title_list, "Similarity": sims})
+    out["Similarity (%)"] = (out["Similarity"] * 100).round(2)  # FIXED typo
 
     # Show results
     st.subheader("Closest matches")
-    st.dataframe(out.head(top_k)[["Existing Title", "Similarity (%)]"]], use_container_width=True)
+    st.dataframe(out.head(top_k)[["Existing Title", "Similarity (%)"]], use_container_width=True)
 
-    # Simple verdict
+    # Verdict
     max_sim = float(out["Similarity"].max())
     if max_sim >= threshold:
         st.warning(f"⚠️ High similarity detected (max={max_sim:.2f}). Consider revising your title.")
