@@ -1,81 +1,67 @@
-# app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 
-st.set_page_config(page_title="IBU Capstone Title Checker", page_icon="🧠", layout="wide")
-st.title("🧠 IBU Capstone Title Similarity Checker")
-
-# --- 1) Dataset Source ---
-DEFAULT_CSV_URL = (
-    "https://docs.google.com/spreadsheets/d/e/2PACX-1vQQAoO_eJz3idWJSu4PVCzgBgEw_NDFwFgNiAOAGoQSvkvTMdZyxwVHiHSuPseZEvpoH6Z8SKDF077b/pub?output=csv"
-)
-
-csv_url_from_secret = st.secrets.get("CSV_URL", "")
-data_url = st.sidebar.text_input("Dataset CSV URL", value=csv_url_from_secret or DEFAULT_CSV_URL)
-
-st.sidebar.markdown(
-    "Tip: Put your Google Sheet in one column called **title**. "
-    "Publish to web → CSV, then paste the link here."
-)
-
-# --- 2) Load model & data (cached) ---
+# Load model once
 @st.cache_resource
 def load_model():
-    return SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+    return SentenceTransformer("all-MiniLM-L6-v2")
 
-@st.cache_data(ttl=600)
-def load_titles(url: str) -> pd.DataFrame:
-    df = pd.read_csv(url)
-    # Ensure column name is 'title'
-    cols_lower = {c: c.strip().lower() for c in df.columns}
-    df.rename(columns=cols_lower, inplace=True)
+model = load_model()
+
+# Load data from CSV
+@st.cache_data
+def load_data(csv_url):
+    df = pd.read_csv(csv_url)
     if "title" not in df.columns:
-        df.rename(columns={df.columns[0]: "title"}, inplace=True)
-    df["title"] = df["title"].astype(str).str.strip()
-    df.dropna(subset=["title"], inplace=True)
-    df.drop_duplicates(subset=["title"], inplace=True)
-    return df[["title"]]
+        raise ValueError("CSV must have a column named 'title'")
+    return df
 
+# Embed titles
 @st.cache_resource
-def embed_titles(_model, titles: list[np.ndarray]):   # FIX: added underscore
-    return _model.encode(titles, normalize_embeddings=True)
+def embed_titles(titles, _model):
+    return _model.encode(titles, convert_to_tensor=False)
 
-# Load everything
-try:
-    model = load_model()
-    titles_df = load_titles(data_url)
-    title_list = titles_df["title"].tolist()
-    title_embeddings = embed_titles(model, title_list)
-except Exception as e:
-    st.error(f"Could not load data/model. Check your CSV URL. Details: {e}")
-    st.stop()
+# App layout
+st.set_page_config(page_title="IBU Capstone Title Checker", page_icon="🧠")
+st.title("🧠 IBU Capstone Title Similarity Checker")
 
-st.success(f"Loaded {len(title_list)} existing titles.")
+csv_url = st.text_input("Dataset CSV URL", placeholder="Paste your published Google Sheet CSV link here")
 
-# --- 3) Query UI ---
-query = st.text_input("Enter a **proposed capstone title** to check similarity")
-top_k = st.slider("How many similar titles to show", 3, 25, 10)
-threshold = st.slider("Flag if similarity ≥", 0.00, 1.00, 0.60, 0.01)
+if csv_url:
+    try:
+        df = load_data(csv_url)
+        st.success(f"Loaded {len(df)} existing titles.")
 
-# --- 4) Compute similarity ---
-if query:
-    q_vec = model.encode([query], normalize_embeddings=True)
-    sims = (q_vec @ title_embeddings.T)[0]  # cosine sim since normalized
-    out = pd.DataFrame({"Existing Title": title_list, "Similarity": sims})
-    out["Similarity (%)"] = (out["Similarity"] * 100).round(2)  # FIXED typo
+        existing_titles = df["title"].astype(str).tolist()
+        existing_embeddings = embed_titles(existing_titles, model)
 
-    # Show results
-    st.subheader("Closest matches")
-    st.dataframe(out.head(top_k)[["Existing Title", "Similarity (%)"]], use_container_width=True)
+        # User input
+        query = st.text_input("Enter a proposed capstone title to check similarity")
+        top_n = st.slider("How many similar titles to show", 1, 10, 5)
+        threshold = st.slider("Flag if similarity ≥", 0.0, 1.0, 0.6)
 
-    # Verdict
-    max_sim = float(out["Similarity"].max())
-    if max_sim >= threshold:
-        st.warning(f"⚠️ High similarity detected (max={max_sim:.2f}). Consider revising your title.")
-    else:
-        st.success(f"✅ Looks unique enough (max similarity={max_sim:.2f}).")
-else:
-    st.info("Type a proposed title above to see similar ones.")
+        if query:
+            query_embedding = embed_titles([query], model)
+            similarities = cosine_similarity([query_embedding[0]], existing_embeddings)[0]
+
+            results = pd.DataFrame({
+                "Existing Title": existing_titles,
+                "Similarity (%)": np.round(similarities * 100, 2)
+            }).sort_values(by="Similarity (%)", ascending=False).reset_index(drop=True)
+
+            # Highlight Top Match
+            top_match = results.iloc[0]
+            if top_match["Similarity (%)"] >= threshold * 100:
+                st.error(f"⚠️ Too close! Your title is **{top_match['Similarity (%)']}% similar** to: *{top_match['Existing Title']}*")
+            else:
+                st.success(f"✅ Looks unique! Closest match is {top_match['Similarity (%)']}% similar: *{top_match['Existing Title']}*")
+
+            # Show table of top N matches
+            st.subheader("Top Similar Titles")
+            st.dataframe(results.head(top_n))
+
+    except Exception as e:
+        st.error(f"Could not load data. Error: {e}")
